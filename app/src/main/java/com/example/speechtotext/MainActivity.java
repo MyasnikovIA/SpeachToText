@@ -31,6 +31,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean isListening = false;
 
     private static final int PERMISSION_RECORD_AUDIO = 1;
+    private static final long ERROR_RETRY_DELAY = 1000; // 1 секунда
+    private static final long SPEECH_TIMEOUT_DELAY = 3000; // 3 секунды для таймаута речи
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,8 +48,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // Автоматически запускаем стенографирование при запуске программы
-        // после проверки разрешений
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 == PackageManager.PERMISSION_GRANTED && speechRecognizer != null) {
             startAutoTranscription();
@@ -104,7 +104,6 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == PERMISSION_RECORD_AUDIO) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 Toast.makeText(this, "Разрешение на запись получено", Toast.LENGTH_SHORT).show();
-                // Автоматически запускаем стенографирование после получения разрешений
                 startAutoTranscription();
             } else {
                 Toast.makeText(this, "Для работы приложения требуется разрешение на запись", Toast.LENGTH_LONG).show();
@@ -123,24 +122,28 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public void run() {
                             tvStatus.setText("Статус: Говорите...");
-                            // Toast.makeText(MainActivity.this, "Говорите...", Toast.LENGTH_SHORT).show();
                         }
                     });
                 }
 
                 @Override
                 public void onBeginningOfSpeech() {
-                    // Начало речи
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            tvStatus.setText("Статус: Распознавание...");
+                        }
+                    });
                 }
 
                 @Override
                 public void onRmsChanged(float rmsdB) {
-                    // Уровень громкости изменился
+                    // Можно использовать для визуализации громкости
                 }
 
                 @Override
                 public void onBufferReceived(byte[] buffer) {
-                    // Получен буфер
+                    // Не используется
                 }
 
                 @Override
@@ -161,34 +164,43 @@ public class MainActivity extends AppCompatActivity {
                             String errorMessage = getErrorText(error);
                             tvStatus.setText("Статус: Ошибка - " + errorMessage);
 
-                            // Автоматически перезапускаем прослушивание при некоторых ошибках
-                            if (error == SpeechRecognizer.ERROR_NO_MATCH ||
-                                    error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                                if (isListening) {
-                                    startListening();
+                            // Автоматически перезапускаем прослушивание при большинстве ошибок
+                            if (isListening) {
+                                boolean shouldRestart = false;
+
+                                switch (error) {
+                                    case SpeechRecognizer.ERROR_NO_MATCH:
+                                    case SpeechRecognizer.ERROR_SPEECH_TIMEOUT:
+                                    case SpeechRecognizer.ERROR_CLIENT:
+                                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
+                                        shouldRestart = true;
+                                        break;
+
+                                    case SpeechRecognizer.ERROR_NETWORK:
+                                    case SpeechRecognizer.ERROR_NETWORK_TIMEOUT:
+                                        shouldRestart = true;
+                                        Toast.makeText(MainActivity.this,
+                                                "Ошибка сети, перезапуск...",
+                                                Toast.LENGTH_SHORT).show();
+                                        break;
+
+                                    case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
+                                        checkPermissions();
+                                        break;
                                 }
-                            }
 
-                            // Логика для ошибки сети: останавливаем и снова запускаем стенографирование
-                            if (error == SpeechRecognizer.ERROR_NETWORK ||
-                                    error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT) {
-                                if (isListening) {
-                                    // Сначала останавливаем
-                                    stopTranscription();
-
-                                    // Задержка перед повторным запуском (например, 1 секунда)
+                                if (shouldRestart) {
+                                    // Задержка перед повторным запуском
                                     new android.os.Handler().postDelayed(
                                             new Runnable() {
                                                 @Override
                                                 public void run() {
-                                                    // Снова запускаем
-                                                    startTranscription();
-                                                    Toast.makeText(MainActivity.this,
-                                                            "Перезапуск после ошибки сети",
-                                                            Toast.LENGTH_SHORT).show();
+                                                    if (isListening) {
+                                                        startListening();
+                                                    }
                                                 }
                                             },
-                                            1000 // 1 секунда задержки
+                                            ERROR_RETRY_DELAY
                                     );
                                 }
                             }
@@ -201,19 +213,43 @@ public class MainActivity extends AppCompatActivity {
                     ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                     if (matches != null && !matches.isEmpty()) {
                         String text = matches.get(0);
-                        appendToResult(text);
-                        appendToResult(".\r\n");
+                        if (text != null && !text.trim().isEmpty()) {
+                            appendToResult(text);
+                            // Добавляем пробел для разделения предложений
+                            appendToResult(" ");
+                        }
                     }
 
-                    // Перезапускаем прослушивание, если режим активен
+                    // НЕМЕДЛЕННО перезапускаем прослушивание без задержки
                     if (isListening) {
-                        startListening();
+                        // Используем post для немедленного запуска
+                        new android.os.Handler().post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (isListening) {
+                                    startListening();
+                                }
+                            }
+                        });
                     }
                 }
 
                 @Override
                 public void onPartialResults(Bundle partialResults) {
-                    // Частичные результаты (не поддерживается всеми устройствами)
+                    // Используем частичные результаты для более плавного отображения
+                    ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                    if (matches != null && !matches.isEmpty()) {
+                        String partialText = matches.get(0);
+                        if (partialText != null && !partialText.trim().isEmpty()) {
+                            // Можно обновлять статус или показывать частичный текст
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    tvStatus.setText("Статус: " + partialText.substring(0, Math.min(partialText.length(), 30)) + "...");
+                                }
+                            });
+                        }
+                    }
                 }
 
                 @Override
@@ -226,7 +262,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // Метод для автоматического запуска при старте программы
     private void startAutoTranscription() {
         if (!isListening) {
             startTranscription();
@@ -242,7 +277,9 @@ public class MainActivity extends AppCompatActivity {
                 btnStart.setEnabled(false);
                 btnStop.setEnabled(true);
                 tvStatus.setText("Статус: Запуск...");
-                startListening();
+
+                // Начинаем прослушивание с оптимальными параметрами для непрерывности
+                startContinuousListening();
             } else {
                 Toast.makeText(this, "Распознаватель речи не инициализирован", Toast.LENGTH_SHORT).show();
             }
@@ -252,16 +289,30 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void startListening() {
-        if (speechRecognizer != null) {
+    private void startContinuousListening() {
+        if (speechRecognizer != null && isListening) {
             Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU"); // Русский язык
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU");
+
+            // Ключевые параметры для непрерывного распознавания
             intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
-            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
+
+            // Увеличиваем время ожидания речи
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 5000); // 5 секунд
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000); // 3 секунды
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000); // 2 секунды
+
+            // Пытаемся использовать веб-сервис Google для лучшего качества
+            intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false);
 
             speechRecognizer.startListening(intent);
         }
+    }
+
+    private void startListening() {
+        startContinuousListening();
     }
 
     private void stopTranscription() {
@@ -270,7 +321,11 @@ public class MainActivity extends AppCompatActivity {
         btnStop.setEnabled(false);
 
         if (speechRecognizer != null) {
-            speechRecognizer.stopListening();
+            try {
+                speechRecognizer.stopListening();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
 
         tvStatus.setText("Статус: Остановлено");
@@ -289,9 +344,21 @@ public class MainActivity extends AppCompatActivity {
                 String currentText = tvResult.getText().toString();
 
                 if (currentText.equals("Текст появится здесь...")) {
-                    tvResult.setText(newText);
+                    tvResult.setText(newText.trim());
                 } else {
-                    tvResult.setText(currentText + " " + newText);
+                    // Убираем лишние пробелы в начале нового текста
+                    String trimmedNewText = newText.trim();
+
+                    // Добавляем пробел только если предыдущий текст не заканчивается знаком препинания
+                    if (!currentText.isEmpty() &&
+                            !currentText.endsWith(" ") &&
+                            !currentText.endsWith(".") &&
+                            !currentText.endsWith("!") &&
+                            !currentText.endsWith("?")) {
+                        currentText += " ";
+                    }
+
+                    tvResult.setText(currentText + trimmedNewText);
                 }
 
                 tvStatus.setText("Статус: Получен текст");
