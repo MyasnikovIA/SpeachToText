@@ -173,7 +173,7 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public void run() {
                             String errorMessage = getErrorText(error);
-                            tvStatus.setText("Статус: Ошибка - " + errorMessage);
+                            tvStatus.setText("Статус:("+error+") Ошибка - " + errorMessage);
 
                             if (isListening) {
                                 boolean shouldRestart = false;
@@ -224,12 +224,19 @@ public class MainActivity extends AppCompatActivity {
                 public void onResults(Bundle results) {
                     ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                     if (matches != null && !matches.isEmpty()) {
-                        String text = matches.get(0);
-                        if (text != null && !text.trim().isEmpty()) {
-                            // Обрабатываем текст с добавлением знаков препинания
-                            String processedText = processTextWithPunctuation(text);
-                            appendToResult(processedText);
+                        for (String text : matches) {
+                            appendToResult(text);
+                            appendToResult("\n");
                         }
+                        appendToResult("\n----------------\n");
+
+                        //String text = matches.get(0);
+                        //if (text != null && !text.trim().isEmpty()) {
+                        //    // Обрабатываем текст с добавлением знаков препинания
+                        //    String processedText = processTextWithPunctuation(text);
+                        //    appendToResult(processedText);
+                        //    appendToResult("\r\n");
+                        //}
                     }
 
                     // Немедленно перезапускаем прослушивание
@@ -508,7 +515,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void clearText() {
-        tvResult.setText("Текст появится здесь...");
+        tvResult.setText("");
         Toast.makeText(this, "Текст очищен", Toast.LENGTH_SHORT).show();
     }
 
@@ -516,41 +523,17 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                String currentText = tvResult.getText().toString();
-
-                if (currentText.equals("Текст появится здесь...")) {
-                    tvResult.setText(newText);
-                } else {
-                    // Умное добавление текста с учетом знаков препинания
-                    String trimmedNewText = newText.trim();
-
-                    // Если предыдущий текст заканчивается знаком препинания, добавляем пробел
-                    if (!currentText.isEmpty() &&
-                            !currentText.endsWith(" ") &&
-                            !currentText.endsWith("\n")) {
-
-                        // Проверяем последний символ
-                        char lastChar = currentText.charAt(currentText.length() - 1);
-                        if (lastChar != '.' && lastChar != '!' && lastChar != '?' &&
-                                lastChar != ',' && lastChar != ':' && lastChar != ';') {
-                            currentText += " ";
+                tvResult.append(newText);
+                // Прокручиваем ScrollView вниз
+                final ScrollView scrollView = findViewById(R.id.scrollView);
+                if (scrollView != null) {
+                    scrollView.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            scrollView.fullScroll(View.FOCUS_DOWN);
                         }
-                    }
-
-                    tvResult.setText(currentText + trimmedNewText);
-
-                    // Прокручиваем ScrollView вниз
-                    final ScrollView scrollView = findViewById(R.id.scrollView);
-                    if (scrollView != null) {
-                        scrollView.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                scrollView.fullScroll(View.FOCUS_DOWN);
-                            }
-                        });
-                    }
+                    });
                 }
-
                 tvStatus.setText("Статус: Текст обновлен");
             }
         });
