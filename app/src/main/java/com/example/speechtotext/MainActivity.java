@@ -9,6 +9,7 @@ import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -18,6 +19,8 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -31,8 +34,12 @@ public class MainActivity extends AppCompatActivity {
     private boolean isListening = false;
 
     private static final int PERMISSION_RECORD_AUDIO = 1;
-    private static final long ERROR_RETRY_DELAY = 1000; // 1 секунда
-    private static final long SPEECH_TIMEOUT_DELAY = 3000; // 3 секунды для таймаута речи
+    private static final long ERROR_RETRY_DELAY = 1000;
+
+    // Переменные для обработки знаков препинания
+    private String lastProcessedText = "";
+    private int consecutiveSilenceCount = 0;
+    private static final int SILENCE_THRESHOLD_FOR_PERIOD = 3; // Количество тихих сессий для точки
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,6 +88,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onClick(View v) {
                 clearText();
+                lastProcessedText = "";
+                consecutiveSilenceCount = 0;
             }
         });
     }
@@ -132,13 +141,14 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public void run() {
                             tvStatus.setText("Статус: Распознавание...");
+                            consecutiveSilenceCount = 0; // Сброс счетчика тишины
                         }
                     });
                 }
 
                 @Override
                 public void onRmsChanged(float rmsdB) {
-                    // Можно использовать для визуализации громкости
+                    // Можно использовать для детектирования тишины
                 }
 
                 @Override
@@ -152,6 +162,7 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public void run() {
                             tvStatus.setText("Статус: Обработка...");
+                            consecutiveSilenceCount++;
                         }
                     });
                 }
@@ -164,16 +175,14 @@ public class MainActivity extends AppCompatActivity {
                             String errorMessage = getErrorText(error);
                             tvStatus.setText("Статус: Ошибка - " + errorMessage);
 
-                            // Автоматически перезапускаем прослушивание при большинстве ошибок
                             if (isListening) {
                                 boolean shouldRestart = false;
 
                                 switch (error) {
                                     case SpeechRecognizer.ERROR_NO_MATCH:
                                     case SpeechRecognizer.ERROR_SPEECH_TIMEOUT:
-                                    case SpeechRecognizer.ERROR_CLIENT:
-                                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
                                         shouldRestart = true;
+                                        consecutiveSilenceCount++;
                                         break;
 
                                     case SpeechRecognizer.ERROR_NETWORK:
@@ -187,10 +196,13 @@ public class MainActivity extends AppCompatActivity {
                                     case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
                                         checkPermissions();
                                         break;
+
+                                    default:
+                                        shouldRestart = true;
+                                        break;
                                 }
 
                                 if (shouldRestart) {
-                                    // Задержка перед повторным запуском
                                     new android.os.Handler().postDelayed(
                                             new Runnable() {
                                                 @Override
@@ -214,15 +226,14 @@ public class MainActivity extends AppCompatActivity {
                     if (matches != null && !matches.isEmpty()) {
                         String text = matches.get(0);
                         if (text != null && !text.trim().isEmpty()) {
-                            appendToResult(text);
-                            // Добавляем пробел для разделения предложений
-                            appendToResult(" ");
+                            // Обрабатываем текст с добавлением знаков препинания
+                            String processedText = processTextWithPunctuation(text);
+                            appendToResult(processedText);
                         }
                     }
 
-                    // НЕМЕДЛЕННО перезапускаем прослушивание без задержки
+                    // Немедленно перезапускаем прослушивание
                     if (isListening) {
-                        // Используем post для немедленного запуска
                         new android.os.Handler().post(new Runnable() {
                             @Override
                             public void run() {
@@ -236,16 +247,19 @@ public class MainActivity extends AppCompatActivity {
 
                 @Override
                 public void onPartialResults(Bundle partialResults) {
-                    // Используем частичные результаты для более плавного отображения
+                    // Отображаем частичные результаты
                     ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                     if (matches != null && !matches.isEmpty()) {
                         String partialText = matches.get(0);
                         if (partialText != null && !partialText.trim().isEmpty()) {
-                            // Можно обновлять статус или показывать частичный текст
                             runOnUiThread(new Runnable() {
                                 @Override
                                 public void run() {
-                                    tvStatus.setText("Статус: " + partialText.substring(0, Math.min(partialText.length(), 30)) + "...");
+                                    String displayText = partialText;
+                                    if (displayText.length() > 50) {
+                                        displayText = "..." + displayText.substring(displayText.length() - 47);
+                                    }
+                                    tvStatus.setText("Частично: " + displayText);
                                 }
                             });
                         }
@@ -260,6 +274,169 @@ public class MainActivity extends AppCompatActivity {
         } else {
             Toast.makeText(this, "Распознавание речи не поддерживается на этом устройстве", Toast.LENGTH_LONG).show();
         }
+    }
+
+    private String processTextWithPunctuation(String text) {
+        // Приводим к нижнему регистру для обработки
+        String lowerText = text.toLowerCase().trim();
+
+        // Обрабатываем текст и добавляем знаки препинания
+        String processedText = text;
+
+        // 1. Добавляем точку в конец, если была длинная пауза
+        if (consecutiveSilenceCount >= SILENCE_THRESHOLD_FOR_PERIOD) {
+            if (!processedText.endsWith(".") && !processedText.endsWith("!") && !processedText.endsWith("?")) {
+                processedText = processedText + ".";
+            }
+            consecutiveSilenceCount = 0; // Сброс после добавления точки
+        }
+
+        // 2. Автоматическая капитализация начала предложения
+        if (lastProcessedText.isEmpty() ||
+                lastProcessedText.endsWith(".") ||
+                lastProcessedText.endsWith("!") ||
+                lastProcessedText.endsWith("?")) {
+            if (processedText.length() > 0) {
+                processedText = processedText.substring(0, 1).toUpperCase() +
+                        processedText.substring(1);
+            }
+        }
+
+        // 3. Обработка ключевых слов для знаков препинания
+        processedText = addPunctuationByKeywords(processedText);
+
+        // 4. Обработка вопросительных конструкций
+        if (isQuestion(lowerText)) {
+            if (!processedText.endsWith("?")) {
+                // Убираем возможную точку в конце
+                processedText = processedText.replaceAll("\\.$", "");
+                processedText = processedText + "?";
+            }
+        }
+
+        // 5. Обработка восклицательных конструкций
+        if (isExclamation(lowerText)) {
+            if (!processedText.endsWith("!")) {
+                processedText = processedText.replaceAll("\\.$", "");
+                processedText = processedText + "!";
+            }
+        }
+
+        // 6. Добавление запятых по паузам и логике
+        processedText = addCommasByPauses(processedText, lowerText);
+
+        // Сохраняем последний обработанный текст
+        lastProcessedText = processedText;
+
+        return processedText;
+    }
+
+    private String addPunctuationByKeywords(String text) {
+        String result = text;
+
+        // Паттерны для замены с сохранением регистра
+        result = result.replaceAll("(?i)\\s*точка\\s*$", ".");
+        result = result.replaceAll("(?i)\\s*запятая\\s*", ", ");
+        result = result.replaceAll("(?i)\\s*восклицательный знак\\s*$", "!");
+        result = result.replaceAll("(?i)\\s*вопросительный знак\\s*$", "?");
+        result = result.replaceAll("(?i)\\s*двоеточие\\s*", ": ");
+        result = result.replaceAll("(?i)\\s*точка с запятой\\s*", "; ");
+
+        // Замена словесных указаний на знаки
+        result = result.replaceAll("(?i)\\s*новый абзац\\s*", "\n\n");
+        result = result.replaceAll("(?i)\\s*абзац\\s*", "\n\n");
+
+        return result.trim();
+    }
+
+    private boolean isQuestion(String text) {
+        // Вопросительные слова
+        String[] questionWords = {
+                "кто", "что", "где", "когда", "почему", "зачем", "как",
+                "сколько", "чей", "кого", "кому", "чем", "какой", "какая",
+                "какое", "какие", "ли"
+        };
+
+        // Вопросительные конструкции
+        String lowerText = text.toLowerCase();
+
+        // Проверяем начало предложения
+        for (String word : questionWords) {
+            if (lowerText.startsWith(word + " ") ||
+                    lowerText.contains(" " + word + " ") ||
+                    lowerText.endsWith(" " + word)) {
+                return true;
+            }
+        }
+
+        // Проверяем интонацию (глагол в начале)
+        String[] questionPatterns = {
+                "^а\\s+", "^и\\s+", "^но\\s+", "^так\\s+", "^неужели\\s+",
+                "^разве\\s+", "^что\\s+если", "^а\\s+что\\s+если"
+        };
+
+        for (String pattern : questionPatterns) {
+            if (lowerText.matches(pattern + ".*")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isExclamation(String text) {
+        String lowerText = text.toLowerCase();
+
+        // Восклицательные слова и конструкции
+        String[] exclamationWords = {
+                "какой", "какая", "какое", "какие", "сколько", "так",
+                "просто", "невероятно", "удивительно", "здорово", "круто",
+                "отлично", "прекрасно", "восхитительно", "жутко", "страшно"
+        };
+
+        for (String word : exclamationWords) {
+            if (lowerText.contains(word)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private String addCommasByPauses(String text, String lowerText) {
+        // Правила для добавления запятых
+        StringBuilder result = new StringBuilder(text);
+
+        // 1. Запятые перед союзами
+        String[] conjunctions = {"а", "но", "однако", "зато", "или", "либо", "то", "как"};
+        for (String conj : conjunctions) {
+            String pattern = "\\s" + conj + "\\s";
+            String replacement = ", " + conj + " ";
+            result = new StringBuilder(result.toString().replaceAll("(?i)" + pattern, replacement));
+        }
+
+        // 2. Запятые после вводных слов
+        String[] introWords = {"во-первых", "во-вторых", "в-третьих", "однако",
+                "конечно", "возможно", "вероятно", "казалось",
+                "кстати", "например", "итак", "следовательно"};
+        for (String intro : introWords) {
+            String pattern = "^" + intro + "\\s";
+            String replacement = intro + ", ";
+            result = new StringBuilder(result.toString().replaceAll("(?i)" + pattern, replacement));
+
+            pattern = "\\s" + intro + "\\s";
+            replacement = " " + intro + ", ";
+            result = new StringBuilder(result.toString().replaceAll("(?i)" + pattern, replacement));
+        }
+
+        // 3. Запятые в перечислениях
+        String[] enumerationWords = {"и", "или", "либо"};
+        for (String enumWord : enumerationWords) {
+            String pattern = "\\s\\w+\\s" + enumWord + "\\s\\w+";
+            // Это упрощенная логика, можно сделать более сложную
+        }
+
+        return result.toString();
     }
 
     private void startAutoTranscription() {
@@ -277,8 +454,6 @@ public class MainActivity extends AppCompatActivity {
                 btnStart.setEnabled(false);
                 btnStop.setEnabled(true);
                 tvStatus.setText("Статус: Запуск...");
-
-                // Начинаем прослушивание с оптимальными параметрами для непрерывности
                 startContinuousListening();
             } else {
                 Toast.makeText(this, "Распознаватель речи не инициализирован", Toast.LENGTH_SHORT).show();
@@ -295,17 +470,17 @@ public class MainActivity extends AppCompatActivity {
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU");
 
-            // Ключевые параметры для непрерывного распознавания
+            // Настройки для лучшего распознавания
             intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
             intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
 
-            // Увеличиваем время ожидания речи
-            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 5000); // 5 секунд
-            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000); // 3 секунды
-            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000); // 2 секунды
+            // Настройки времени ожидания
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 8000);
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500);
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500);
 
-            // Пытаемся использовать веб-сервис Google для лучшего качества
-            intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false);
+            // Включаем детализацию
+            intent.putExtra("android.speech.extra.DICTATION_MODE", true);
 
             speechRecognizer.startListening(intent);
         }
@@ -344,24 +519,39 @@ public class MainActivity extends AppCompatActivity {
                 String currentText = tvResult.getText().toString();
 
                 if (currentText.equals("Текст появится здесь...")) {
-                    tvResult.setText(newText.trim());
+                    tvResult.setText(newText);
                 } else {
-                    // Убираем лишние пробелы в начале нового текста
+                    // Умное добавление текста с учетом знаков препинания
                     String trimmedNewText = newText.trim();
 
-                    // Добавляем пробел только если предыдущий текст не заканчивается знаком препинания
+                    // Если предыдущий текст заканчивается знаком препинания, добавляем пробел
                     if (!currentText.isEmpty() &&
                             !currentText.endsWith(" ") &&
-                            !currentText.endsWith(".") &&
-                            !currentText.endsWith("!") &&
-                            !currentText.endsWith("?")) {
-                        currentText += " ";
+                            !currentText.endsWith("\n")) {
+
+                        // Проверяем последний символ
+                        char lastChar = currentText.charAt(currentText.length() - 1);
+                        if (lastChar != '.' && lastChar != '!' && lastChar != '?' &&
+                                lastChar != ',' && lastChar != ':' && lastChar != ';') {
+                            currentText += " ";
+                        }
                     }
 
                     tvResult.setText(currentText + trimmedNewText);
+
+                    // Прокручиваем ScrollView вниз
+                    final ScrollView scrollView = findViewById(R.id.scrollView);
+                    if (scrollView != null) {
+                        scrollView.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                scrollView.fullScroll(View.FOCUS_DOWN);
+                            }
+                        });
+                    }
                 }
 
-                tvStatus.setText("Статус: Получен текст");
+                tvStatus.setText("Статус: Текст обновлен");
             }
         });
     }
