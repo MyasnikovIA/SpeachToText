@@ -9,6 +9,7 @@ import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -18,7 +19,14 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -26,12 +34,14 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView tvResult;
     private TextView tvStatus;
+    private EditText etServerUrl;
     private Button btnStart;
     private Button btnStop;
     private Button btnClear;
 
     private SpeechRecognizer speechRecognizer;
     private boolean isListening = false;
+    private ExecutorService executorService;
 
     private static final int PERMISSION_RECORD_AUDIO = 1;
     private static final long ERROR_RETRY_DELAY = 1000;
@@ -50,13 +60,15 @@ public class MainActivity extends AppCompatActivity {
         setupButtons();
         checkPermissions();
         setupSpeechRecognizer();
+
+        // Создаем пул потоков для отправки запросов
+        executorService = Executors.newFixedThreadPool(2);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED && speechRecognizer != null) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED && speechRecognizer != null) {
             startAutoTranscription();
         }
     }
@@ -64,6 +76,7 @@ public class MainActivity extends AppCompatActivity {
     private void initViews() {
         tvResult = findViewById(R.id.tvResult);
         tvStatus = findViewById(R.id.tvStatus);
+        etServerUrl = findViewById(R.id.etServerUrl);
         btnStart = findViewById(R.id.btnStart);
         btnStop = findViewById(R.id.btnStop);
         btnClear = findViewById(R.id.btnClear);
@@ -90,6 +103,86 @@ public class MainActivity extends AppCompatActivity {
                 clearText();
                 lastProcessedText = "";
                 consecutiveSilenceCount = 0;
+            }
+        });
+    }
+
+    // Метод для отправки текста на сервер (аналогично Chrome плагину)
+    private void sendTextToServer(final String text) {
+        if (text == null || text.trim().isEmpty()) {
+            return;
+        }
+
+        executorService.execute(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection connection = null;
+                try {
+                    // Получаем URL из поля ввода
+                    String serverUrl = etServerUrl.getText().toString().trim();
+                    if (serverUrl.isEmpty()) {
+                        serverUrl = "192.168.15.3:8080"; // значение по умолчанию
+                    }
+
+                    // Добавляем протокол если отсутствует
+                    if (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://")) {
+                        serverUrl = "http://" + serverUrl;
+                    }
+
+                    // Подготавливаем текст для отправки (аналогично плагину)
+                    String encodedText = URLEncoder.encode(text, "UTF-8");
+                    String urlStr = serverUrl + "/?text=" + encodedText;
+
+                    URL url = new URL(urlStr);
+                    connection = (HttpURLConnection) url.openConnection();
+                    connection.setRequestMethod("GET");
+                    connection.setConnectTimeout(5000); // 5 секунд таймаут
+                    connection.setReadTimeout(5000);
+                    connection.setRequestProperty("User-Agent", "Android-Speech-To-Text-App");
+                    connection.setRequestProperty("Accept", "text/plain");
+
+                    // Отправляем запрос
+                    int responseCode = connection.getResponseCode();
+
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (responseCode == 200 || responseCode == 204) {
+                                // Успешно отправлено
+                                tvStatus.setText("Статус: Текст отправлен на сервер");
+                            } else {
+                                tvStatus.setText("Статус: Ошибка отправки (" + responseCode + ")");
+                            }
+                        }
+                    });
+
+                    // Читаем ответ (если есть)
+                    if (responseCode == 200) {
+                        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+                        StringBuilder response = new StringBuilder();
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            response.append(line);
+                        }
+                        reader.close();
+                    }
+
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            tvStatus.setText("Статус: Ошибка соединения");
+                            Toast.makeText(MainActivity.this,
+                                    "Ошибка отправки на сервер: " + e.getMessage(),
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                } finally {
+                    if (connection != null) {
+                        connection.disconnect();
+                    }
+                }
             }
         });
     }
@@ -225,18 +318,17 @@ public class MainActivity extends AppCompatActivity {
                     ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                     if (matches != null && !matches.isEmpty()) {
                         for (String text : matches) {
-                            appendToResult(text);
-                            appendToResult("\n");
+                            // Отправляем каждый распознанный фрагмент на сервер
+                            if (text != null && !text.trim().isEmpty()) {
+                                // Добавляем в результат
+                                appendToResult(text);
+                                appendToResult("\n");
+
+                                // Отправляем на сервер (аналогично Chrome плагину)
+                                sendTextToServer(text);
+                            }
                         }
                         appendToResult("\n----------------\n");
-
-                        //String text = matches.get(0);
-                        //if (text != null && !text.trim().isEmpty()) {
-                        //    // Обрабатываем текст с добавлением знаков препинания
-                        //    String processedText = processTextWithPunctuation(text);
-                        //    appendToResult(processedText);
-                        //    appendToResult("\r\n");
-                        //}
                     }
 
                     // Немедленно перезапускаем прослушивание
@@ -448,13 +540,13 @@ public class MainActivity extends AppCompatActivity {
 
     private void startAutoTranscription() {
         if (!isListening) {
-            startTranscription();
+            //
+            //startTranscription();
         }
     }
 
     private void startTranscription() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)  == PackageManager.PERMISSION_GRANTED) {
 
             if (speechRecognizer != null) {
                 isListening = true;
@@ -567,6 +659,9 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (executorService != null && !executorService.isShutdown()) {
+            executorService.shutdown();
+        }
         if (speechRecognizer != null) {
             speechRecognizer.destroy();
         }
