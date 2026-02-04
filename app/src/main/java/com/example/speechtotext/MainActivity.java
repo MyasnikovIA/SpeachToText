@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -45,11 +46,16 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int PERMISSION_RECORD_AUDIO = 1;
     private static final long ERROR_RETRY_DELAY = 1000;
+    private static final int MAX_SERVER_ERROR_RETRIES = 3;
+    private int serverErrorRetryCount = 0;
 
     // Переменные для обработки знаков препинания
     private String lastProcessedText = "";
     private int consecutiveSilenceCount = 0;
     private static final int SILENCE_THRESHOLD_FOR_PERIOD = 3; // Количество тихих сессий для точки
+
+    // Handler для перезапуска при ошибках
+    private Handler errorHandler = new Handler();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -150,8 +156,13 @@ public class MainActivity extends AppCompatActivity {
                             if (responseCode == 200 || responseCode == 204) {
                                 // Успешно отправлено
                                 tvStatus.setText("Статус: Текст отправлен на сервер");
+                                serverErrorRetryCount = 0; // Сброс счетчика ошибок при успешной отправке
                             } else {
                                 tvStatus.setText("Статус: Ошибка отправки (" + responseCode + ")");
+                                // Не перезапускаем распознавание, просто сообщаем об ошибке отправки
+                                Toast.makeText(MainActivity.this,
+                                        "Ошибка отправки на сервер. Код: " + responseCode,
+                                        Toast.LENGTH_SHORT).show();
                             }
                         }
                     });
@@ -172,9 +183,10 @@ public class MainActivity extends AppCompatActivity {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            tvStatus.setText("Статус: Ошибка соединения");
+                            tvStatus.setText("Статус: Ошибка соединения с сервером отправки");
+                            // Не останавливаем распознавание, только показываем ошибку
                             Toast.makeText(MainActivity.this,
-                                    "Ошибка отправки на сервер: " + e.getMessage(),
+                                    "Ошибка отправки на сервер. Следующий текст попробуем отправить снова.",
                                     Toast.LENGTH_SHORT).show();
                         }
                     });
@@ -266,7 +278,7 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public void run() {
                             String errorMessage = getErrorText(error);
-                            tvStatus.setText("Статус:("+error+") Ошибка - " + errorMessage);
+                            tvStatus.setText("Статус:(" + error + ") Ошибка - " + errorMessage);
 
                             if (isListening) {
                                 boolean shouldRestart = false;
@@ -286,8 +298,35 @@ public class MainActivity extends AppCompatActivity {
                                                 Toast.LENGTH_SHORT).show();
                                         break;
 
+                                    case SpeechRecognizer.ERROR_SERVER:
+                                        // Ошибка сервера распознавания - перезапускаем
+                                        serverErrorRetryCount++;
+                                        if (serverErrorRetryCount <= MAX_SERVER_ERROR_RETRIES) {
+                                            shouldRestart = true;
+                                            Toast.makeText(MainActivity.this,
+                                                    "Ошибка сервера распознавания (" + serverErrorRetryCount + "/" + MAX_SERVER_ERROR_RETRIES + "), перезапуск...",
+                                                    Toast.LENGTH_SHORT).show();
+                                        } else {
+                                            // Слишком много ошибок, останавливаем
+                                            Toast.makeText(MainActivity.this,
+                                                    "Слишком много ошибок сервера. Остановка распознавания.",
+                                                    Toast.LENGTH_LONG).show();
+                                            stopTranscription();
+                                        }
+                                        break;
+
                                     case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
                                         checkPermissions();
+                                        break;
+
+                                    case SpeechRecognizer.ERROR_CLIENT:
+                                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
+                                    case SpeechRecognizer.ERROR_AUDIO:
+                                        // Эти ошибки также требуют перезапуска
+                                        shouldRestart = true;
+                                        Toast.makeText(MainActivity.this,
+                                                "Ошибка клиента, перезапуск...",
+                                                Toast.LENGTH_SHORT).show();
                                         break;
 
                                     default:
@@ -295,8 +334,8 @@ public class MainActivity extends AppCompatActivity {
                                         break;
                                 }
 
-                                if (shouldRestart) {
-                                    new android.os.Handler().postDelayed(
+                                if (shouldRestart && isListening) {
+                                    errorHandler.postDelayed(
                                             new Runnable() {
                                                 @Override
                                                 public void run() {
@@ -315,17 +354,23 @@ public class MainActivity extends AppCompatActivity {
 
                 @Override
                 public void onResults(Bundle results) {
+                    // Сброс счетчика ошибок сервера при успешном распознавании
+                    serverErrorRetryCount = 0;
+
                     ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                     if (matches != null && !matches.isEmpty()) {
                         for (String text : matches) {
                             // Отправляем каждый распознанный фрагмент на сервер
                             if (text != null && !text.trim().isEmpty()) {
+                                // Обрабатываем текст с пунктуацией
+                                String processedText = processTextWithPunctuation(text);
+
                                 // Добавляем в результат
-                                appendToResult(text);
+                                appendToResult(processedText);
                                 appendToResult("\n");
 
                                 // Отправляем на сервер (аналогично Chrome плагину)
-                                sendTextToServer(text);
+                                sendTextToServer(processedText);
                             }
                         }
                         appendToResult("\n----------------\n");
@@ -333,7 +378,7 @@ public class MainActivity extends AppCompatActivity {
 
                     // Немедленно перезапускаем прослушивание
                     if (isListening) {
-                        new android.os.Handler().post(new Runnable() {
+                        errorHandler.post(new Runnable() {
                             @Override
                             public void run() {
                                 if (isListening) {
@@ -540,19 +585,19 @@ public class MainActivity extends AppCompatActivity {
 
     private void startAutoTranscription() {
         if (!isListening) {
-            //
-            //startTranscription();
+            // Автоматический запуск отключен
+            // startTranscription();
         }
     }
 
     private void startTranscription() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)  == PackageManager.PERMISSION_GRANTED) {
-
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             if (speechRecognizer != null) {
                 isListening = true;
                 btnStart.setEnabled(false);
                 btnStop.setEnabled(true);
                 tvStatus.setText("Статус: Запуск...");
+                serverErrorRetryCount = 0; // Сброс счетчика ошибок при ручном запуске
                 startContinuousListening();
             } else {
                 Toast.makeText(this, "Распознаватель речи не инициализирован", Toast.LENGTH_SHORT).show();
@@ -594,6 +639,9 @@ public class MainActivity extends AppCompatActivity {
         btnStart.setEnabled(true);
         btnStop.setEnabled(false);
 
+        // Удаляем все pending задачи из handler
+        errorHandler.removeCallbacksAndMessages(null);
+
         if (speechRecognizer != null) {
             try {
                 speechRecognizer.stopListening();
@@ -615,7 +663,13 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                tvResult.append(newText);
+                String currentText = tvResult.getText().toString();
+                if (currentText.equals("Текст появится здесь...")) {
+                    tvResult.setText(newText);
+                } else {
+                    tvResult.append(newText);
+                }
+
                 // Прокручиваем ScrollView вниз
                 final ScrollView scrollView = findViewById(R.id.scrollView);
                 if (scrollView != null) {
@@ -659,6 +713,9 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // Удаляем все pending задачи из handler
+        errorHandler.removeCallbacksAndMessages(null);
+
         if (executorService != null && !executorService.isShutdown()) {
             executorService.shutdown();
         }
