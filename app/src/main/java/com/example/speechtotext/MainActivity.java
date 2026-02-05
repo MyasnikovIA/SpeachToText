@@ -46,13 +46,15 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int PERMISSION_RECORD_AUDIO = 1;
     private static final long ERROR_RETRY_DELAY = 1000;
+    private static final long ERROR_AUTO_RESTART_DELAY = 2000;
     private static final int MAX_SERVER_ERROR_RETRIES = 999999;
     private int serverErrorRetryCount = 0;
+    private boolean isRestarting = false;
 
     // Переменные для обработки знаков препинания
     private String lastProcessedText = "";
     private int consecutiveSilenceCount = 0;
-    private static final int SILENCE_THRESHOLD_FOR_PERIOD = 3; // Количество тихих сессий для точки
+    private static final int SILENCE_THRESHOLD_FOR_PERIOD = 3;
 
     // Handler для перезапуска при ошибках
     private Handler errorHandler = new Handler();
@@ -280,8 +282,9 @@ public class MainActivity extends AppCompatActivity {
                             String errorMessage = getErrorText(error);
                             tvStatus.setText("Статус:(" + error + ") Ошибка - " + errorMessage);
 
-                            if (isListening) {
+                            if (isListening && !isRestarting) {
                                 boolean shouldRestart = false;
+                                boolean shouldFullRestart = false; // Флаг для полного перезапуска
 
                                 switch (error) {
                                     case SpeechRecognizer.ERROR_NO_MATCH:
@@ -302,13 +305,15 @@ public class MainActivity extends AppCompatActivity {
                                         // Ошибка сервера распознавания - перезапускаем
                                         serverErrorRetryCount++;
                                         if (serverErrorRetryCount <= MAX_SERVER_ERROR_RETRIES) {
-                                            shouldRestart = true;
-                                            Toast.makeText(MainActivity.this,"Ошибка сервера распознавания (" + serverErrorRetryCount + "/" + MAX_SERVER_ERROR_RETRIES + "), перезапуск...", Toast.LENGTH_SHORT).show();
-                                            stopTranscription();
-                                            startAutoTranscription();
+                                            shouldFullRestart = true; // Полный перезапуск для серверных ошибок
+                                            Toast.makeText(MainActivity.this,
+                                                    "Ошибка сервера распознавания (" + serverErrorRetryCount + "/" + MAX_SERVER_ERROR_RETRIES + "), полный перезапуск...",
+                                                    Toast.LENGTH_SHORT).show();
                                         } else {
                                             // Слишком много ошибок, останавливаем
-                                            Toast.makeText(MainActivity.this, "Слишком много ошибок сервера. Остановка распознавания.",Toast.LENGTH_LONG).show();
+                                            Toast.makeText(MainActivity.this,
+                                                    "Слишком много ошибок сервера. Остановка распознавания.",
+                                                    Toast.LENGTH_LONG).show();
                                             stopTranscription();
                                         }
                                         break;
@@ -320,19 +325,22 @@ public class MainActivity extends AppCompatActivity {
                                     case SpeechRecognizer.ERROR_CLIENT:
                                     case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
                                     case SpeechRecognizer.ERROR_AUDIO:
-                                        // Эти ошибки также требуют перезапуска
-                                        shouldRestart = true;
+                                        // Эти ошибки требуют полного перезапуска
+                                        shouldFullRestart = true;
                                         Toast.makeText(MainActivity.this,
-                                                "Ошибка клиента, перезапуск...",
+                                                "Ошибка клиента/аудио, полный перезапуск...",
                                                 Toast.LENGTH_SHORT).show();
                                         break;
-
                                     default:
                                         shouldRestart = true;
                                         break;
                                 }
 
-                                if (shouldRestart && isListening) {
+                                if (shouldFullRestart) {
+                                    // Полный перезапуск всей системы распознавания
+                                    fullRestartRecognition();
+                                } else if (shouldRestart && isListening) {
+                                    // Обычный перезапуск прослушивания
                                     errorHandler.postDelayed(
                                             new Runnable() {
                                                 @Override
@@ -416,6 +424,243 @@ public class MainActivity extends AppCompatActivity {
         } else {
             Toast.makeText(this, "Распознавание речи не поддерживается на этом устройстве", Toast.LENGTH_LONG).show();
         }
+    }
+
+    // Новый метод для полного перезапуска системы распознавания
+    private void fullRestartRecognition() {
+        if (isRestarting) {
+            return; // Уже в процессе перезапуска
+        }
+
+        isRestarting = true;
+
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                tvStatus.setText("Статус: Полный перезапуск системы...");
+            }
+        });
+
+        // 1. Останавливаем текущее распознавание
+        if (speechRecognizer != null) {
+            try {
+                speechRecognizer.stopListening();
+                speechRecognizer.destroy();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+
+        // 2. Удаляем все pending задачи
+        errorHandler.removeCallbacksAndMessages(null);
+
+        // 3. Пауза перед повторной инициализацией
+        errorHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                // 4. Сбрасываем состояние
+                consecutiveSilenceCount = 0;
+                lastProcessedText = "";
+
+                // 5. Создаем новый распознаватель
+                if (SpeechRecognizer.isRecognitionAvailable(MainActivity.this)) {
+                    speechRecognizer = SpeechRecognizer.createSpeechRecognizer(MainActivity.this);
+
+                    // 6. Устанавливаем тот же самый listener
+                    speechRecognizer.setRecognitionListener(new RecognitionListener() {
+                        @Override
+                        public void onReadyForSpeech(Bundle params) {
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    tvStatus.setText("Статус: Говорите...");
+                                }
+                            });
+                        }
+
+                        @Override
+                        public void onBeginningOfSpeech() {
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    tvStatus.setText("Статус: Распознавание...");
+                                    consecutiveSilenceCount = 0;
+                                }
+                            });
+                        }
+
+                        @Override
+                        public void onRmsChanged(float rmsdB) {
+                            // Не используется
+                        }
+
+                        @Override
+                        public void onBufferReceived(byte[] buffer) {
+                            // Не используется
+                        }
+
+                        @Override
+                        public void onEndOfSpeech() {
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    tvStatus.setText("Статус: Обработка...");
+                                    consecutiveSilenceCount++;
+                                }
+                            });
+                        }
+
+                        @Override
+                        public void onError(int error) {
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    String errorMessage = getErrorText(error);
+                                    tvStatus.setText("Статус:(" + error + ") Ошибка - " + errorMessage);
+
+                                    if (isListening && !isRestarting) {
+                                        boolean shouldRestart = false;
+                                        boolean shouldFullRestart = false;
+
+                                        switch (error) {
+                                            case SpeechRecognizer.ERROR_NO_MATCH:
+                                            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT:
+                                                shouldRestart = true;
+                                                consecutiveSilenceCount++;
+                                                break;
+
+                                            case SpeechRecognizer.ERROR_NETWORK:
+                                            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT:
+                                                shouldRestart = true;
+                                                Toast.makeText(MainActivity.this,
+                                                        "Ошибка сети, перезапуск...",
+                                                        Toast.LENGTH_SHORT).show();
+                                                break;
+
+                                            case SpeechRecognizer.ERROR_SERVER:
+                                                serverErrorRetryCount++;
+                                                if (serverErrorRetryCount <= MAX_SERVER_ERROR_RETRIES) {
+                                                    shouldFullRestart = true;
+                                                    Toast.makeText(MainActivity.this,
+                                                            "Ошибка сервера распознавания (" + serverErrorRetryCount + "/" + MAX_SERVER_ERROR_RETRIES + "), полный перезапуск...",
+                                                            Toast.LENGTH_SHORT).show();
+                                                } else {
+                                                    Toast.makeText(MainActivity.this,
+                                                            "Слишком много ошибок сервера. Остановка распознавания.",
+                                                            Toast.LENGTH_LONG).show();
+                                                    stopTranscription();
+                                                }
+                                                break;
+
+                                            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
+                                                checkPermissions();
+                                                break;
+
+                                            case SpeechRecognizer.ERROR_CLIENT:
+                                            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
+                                            case SpeechRecognizer.ERROR_AUDIO:
+                                                shouldFullRestart = true;
+                                                Toast.makeText(MainActivity.this,
+                                                        "Ошибка клиента/аудио, полный перезапуск...",
+                                                        Toast.LENGTH_SHORT).show();
+                                                break;
+                                            default:
+                                                shouldRestart = true;
+                                                break;
+                                        }
+
+                                        if (shouldFullRestart) {
+                                            fullRestartRecognition();
+                                        } else if (shouldRestart && isListening) {
+                                            errorHandler.postDelayed(
+                                                    new Runnable() {
+                                                        @Override
+                                                        public void run() {
+                                                            if (isListening) {
+                                                                startListening();
+                                                            }
+                                                        }
+                                                    },
+                                                    ERROR_RETRY_DELAY
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        @Override
+                        public void onResults(Bundle results) {
+                            serverErrorRetryCount = 0;
+
+                            ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                            if (matches != null && !matches.isEmpty()) {
+                                for (String text : matches) {
+                                    if (text != null && !text.trim().isEmpty()) {
+                                        String processedText = processTextWithPunctuation(text);
+                                        appendToResult(processedText);
+                                        appendToResult("\n");
+                                        sendTextToServer(processedText);
+                                    }
+                                }
+                                appendToResult("\n----------------\n");
+                            }
+
+                            if (isListening) {
+                                errorHandler.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        if (isListening) {
+                                            startListening();
+                                        }
+                                    }
+                                });
+                            }
+                        }
+
+                        @Override
+                        public void onPartialResults(Bundle partialResults) {
+                            ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                            if (matches != null && !matches.isEmpty()) {
+                                String partialText = matches.get(0);
+                                if (partialText != null && !partialText.trim().isEmpty()) {
+                                    runOnUiThread(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            String displayText = partialText;
+                                            if (displayText.length() > 50) {
+                                                displayText = "..." + displayText.substring(displayText.length() - 47);
+                                            }
+                                            tvStatus.setText("Частично: " + displayText);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+
+                        @Override
+                        public void onEvent(int eventType, Bundle params) {
+                            // Событие
+                        }
+                    });
+
+                    // 7. Запускаем прослушивание заново
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (isListening) {
+                                startListening();
+                                tvStatus.setText("Статус: Система перезапущена, продолжаем...");
+                                Toast.makeText(MainActivity.this, "Система распознавания перезапущена", Toast.LENGTH_SHORT).show();
+                            }
+                        }
+                    });
+                }
+
+                // 8. Сбрасываем флаг перезапуска
+                isRestarting = false;
+            }
+        }, ERROR_AUTO_RESTART_DELAY);
     }
 
     private String processTextWithPunctuation(String text) {
@@ -596,6 +841,7 @@ public class MainActivity extends AppCompatActivity {
                 btnStop.setEnabled(true);
                 tvStatus.setText("Статус: Запуск...");
                 serverErrorRetryCount = 0; // Сброс счетчика ошибок при ручном запуске
+                isRestarting = false; // Сбрасываем флаг при ручном запуске
                 startContinuousListening();
             } else {
                 Toast.makeText(this, "Распознаватель речи не инициализирован", Toast.LENGTH_SHORT).show();
@@ -634,6 +880,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void stopTranscription() {
         isListening = false;
+        isRestarting = false; // Сбрасываем флаг при остановке
         btnStart.setEnabled(true);
         btnStop.setEnabled(false);
 
