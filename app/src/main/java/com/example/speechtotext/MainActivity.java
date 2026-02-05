@@ -46,7 +46,7 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int PERMISSION_RECORD_AUDIO = 1;
     private static final long ERROR_RETRY_DELAY = 1000;
-    private static final int MAX_SERVER_ERROR_RETRIES = 3;
+    private static final int MAX_SERVER_ERROR_RETRIES = 999999;
     private int serverErrorRetryCount = 0;
 
     // Переменные для обработки знаков препинания
@@ -303,14 +303,12 @@ public class MainActivity extends AppCompatActivity {
                                         serverErrorRetryCount++;
                                         if (serverErrorRetryCount <= MAX_SERVER_ERROR_RETRIES) {
                                             shouldRestart = true;
-                                            Toast.makeText(MainActivity.this,
-                                                    "Ошибка сервера распознавания (" + serverErrorRetryCount + "/" + MAX_SERVER_ERROR_RETRIES + "), перезапуск...",
-                                                    Toast.LENGTH_SHORT).show();
+                                            Toast.makeText(MainActivity.this,"Ошибка сервера распознавания (" + serverErrorRetryCount + "/" + MAX_SERVER_ERROR_RETRIES + "), перезапуск...", Toast.LENGTH_SHORT).show();
+                                            stopTranscription();
+                                            startAutoTranscription();
                                         } else {
                                             // Слишком много ошибок, останавливаем
-                                            Toast.makeText(MainActivity.this,
-                                                    "Слишком много ошибок сервера. Остановка распознавания.",
-                                                    Toast.LENGTH_LONG).show();
+                                            Toast.makeText(MainActivity.this, "Слишком много ошибок сервера. Остановка распознавания.",Toast.LENGTH_LONG).show();
                                             stopTranscription();
                                         }
                                         break;
