@@ -24,12 +24,7 @@ import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
-
 /*
-
 package com.example.speechtotext;
 
 import android.Manifest;
@@ -71,6 +66,10 @@ public class MainActivity extends AppCompatActivity {
         // Инициализация SpeechToText
         speechToText = new SpeechToText(this);
         speechToText.setupSpeechRecognizer();
+        
+        // Опциональные настройки
+        speechToText.setEnableFullRestartOnCriticalErrors(true); // Включить полный перезапуск
+        speechToText.setAutoRestartDelay(2000); // Задержка полного перезапуска (мс)
 
         // Установка URL из EditText
         etServerUrl.setText("192.168.15.3:8080");
@@ -236,9 +235,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 }
-
- */
-
+*/
 public class SpeechToText {
 
     public interface CallbackType {
@@ -256,6 +253,7 @@ public class SpeechToText {
     // Основные переменные
     private SpeechRecognizer speechRecognizer;
     private boolean isListening = false;
+    private boolean isRestarting = false;
     private Activity activity;
     private Context context;
     private Handler errorHandler = new Handler();
@@ -273,13 +271,19 @@ public class SpeechToText {
     private static final int MAX_SERVER_ERROR_RETRIES = 999999;
     private int serverErrorRetryCount = 0;
 
+    // Константы задержек
+    private static final long ERROR_RETRY_DELAY = 1000;
+    private static final long ERROR_AUTO_RESTART_DELAY = 2000;
+
     // Настройки
     private String serverUrl = "192.168.15.3:8080";
     private String language = "ru-RU";
-    private long errorRetryDelay = 1000;
+    private long errorRetryDelay = ERROR_RETRY_DELAY;
+    private long autoRestartDelay = ERROR_AUTO_RESTART_DELAY;
     private boolean sendToServerEnabled = true;
     private boolean autoCapitalizationEnabled = true;
     private boolean punctuationProcessingEnabled = true;
+    private boolean enableFullRestartOnCriticalErrors = true;
 
     // Константы разрешений
     private static final int PERMISSION_RECORD_AUDIO = 12421;
@@ -303,6 +307,10 @@ public class SpeechToText {
         this.errorRetryDelay = delayMillis;
     }
 
+    public void setAutoRestartDelay(long delayMillis) {
+        this.autoRestartDelay = delayMillis;
+    }
+
     public void setSendToServerEnabled(boolean enabled) {
         this.sendToServerEnabled = enabled;
     }
@@ -313,6 +321,10 @@ public class SpeechToText {
 
     public void setPunctuationProcessingEnabled(boolean enabled) {
         this.punctuationProcessingEnabled = enabled;
+    }
+
+    public void setEnableFullRestartOnCriticalErrors(boolean enabled) {
+        this.enableFullRestartOnCriticalErrors = enabled;
     }
 
     // Установка обратных вызовов
@@ -357,100 +369,7 @@ public class SpeechToText {
 
     public void setupSpeechRecognizer() {
         if (SpeechRecognizer.isRecognitionAvailable(context)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context);
-
-            speechRecognizer.setRecognitionListener(new RecognitionListener() {
-                @Override
-                public void onReadyForSpeech(Bundle params) {
-                    updateStatus("Говорите...");
-                }
-
-                @Override
-                public void onBeginningOfSpeech() {
-                    updateStatus("Распознавание...");
-                    consecutiveSilenceCount = 0; // Сброс счетчика тишины
-                }
-
-                @Override
-                public void onRmsChanged(float rmsdB) {
-                    // Можно использовать для детектирования тишины
-                }
-
-                @Override
-                public void onBufferReceived(byte[] buffer) {
-                    // Не используется
-                }
-
-                @Override
-                public void onEndOfSpeech() {
-                    updateStatus("Обработка...");
-                    consecutiveSilenceCount++;
-                }
-
-                @Override
-                public void onError(int error) {
-                    handleRecognitionError(error);
-                }
-
-                @Override
-                public void onResults(Bundle results) {
-                    // Сброс счетчика ошибок сервера при успешном распознавании
-                    serverErrorRetryCount = 0;
-
-                    ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                    if (matches != null && !matches.isEmpty()) {
-                        for (String text : matches) {
-                            if (text != null && !text.trim().isEmpty()) {
-                                // Обрабатываем текст с пунктуацией
-                                String processedText = punctuationProcessingEnabled ?
-                                        processTextWithPunctuation(text) : text;
-
-                                // Вызываем callback с результатом
-                                if (onResultsFunction != null) {
-                                    onResultsFunction.setText(processedText + "\n----------------\n");
-                                }
-
-                                // Отправляем на сервер если включено
-                                if (sendToServerEnabled) {
-                                    sendTextToServer(processedText);
-                                }
-                            }
-                        }
-                    }
-
-                    // Немедленно перезапускаем прослушивание
-                    if (isListening) {
-                        errorHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (isListening) {
-                                    startListening();
-                                }
-                            }
-                        });
-                    }
-                }
-
-                @Override
-                public void onPartialResults(Bundle partialResults) {
-                    ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                    if (matches != null && !matches.isEmpty()) {
-                        String partialText = matches.get(0);
-                        if (partialText != null && !partialText.trim().isEmpty()) {
-                            String displayText = partialText;
-                            if (displayText.length() > 50) {
-                                displayText = "..." + displayText.substring(displayText.length() - 47);
-                            }
-                            updateStatus("Частично: " + displayText);
-                        }
-                    }
-                }
-
-                @Override
-                public void onEvent(int eventType, Bundle params) {
-                    // Событие
-                }
-            });
+            createAndSetupSpeechRecognizer();
         } else {
             Toast.makeText(context, "Распознавание речи не поддерживается на этом устройстве", Toast.LENGTH_LONG).show();
             if (onStatusFunction != null) {
@@ -459,12 +378,113 @@ public class SpeechToText {
         }
     }
 
+    private void createAndSetupSpeechRecognizer() {
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context);
+        speechRecognizer.setRecognitionListener(createRecognitionListener());
+    }
+
+    private RecognitionListener createRecognitionListener() {
+        return new RecognitionListener() {
+            @Override
+            public void onReadyForSpeech(Bundle params) {
+                updateStatus("Говорите...");
+            }
+
+            @Override
+            public void onBeginningOfSpeech() {
+                updateStatus("Распознавание...");
+                consecutiveSilenceCount = 0; // Сброс счетчика тишины
+            }
+
+            @Override
+            public void onRmsChanged(float rmsdB) {
+                // Можно использовать для детектирования тишины
+            }
+
+            @Override
+            public void onBufferReceived(byte[] buffer) {
+                // Не используется
+            }
+
+            @Override
+            public void onEndOfSpeech() {
+                updateStatus("Обработка...");
+                consecutiveSilenceCount++;
+            }
+
+            @Override
+            public void onError(int error) {
+                handleRecognitionError(error);
+            }
+
+            @Override
+            public void onResults(Bundle results) {
+                // Сброс счетчика ошибок сервера при успешном распознавании
+                serverErrorRetryCount = 0;
+
+                ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (matches != null && !matches.isEmpty()) {
+                    for (String text : matches) {
+                        if (text != null && !text.trim().isEmpty()) {
+                            // Обрабатываем текст с пунктуацией
+                            String processedText = punctuationProcessingEnabled ?
+                                    processTextWithPunctuation(text) : text;
+
+                            // Вызываем callback с результатом
+                            if (onResultsFunction != null) {
+                                onResultsFunction.setText(processedText + "\n----------------\n");
+                            }
+
+                            // Отправляем на сервер если включено
+                            if (sendToServerEnabled) {
+                                sendTextToServer(processedText);
+                            }
+                        }
+                    }
+                }
+
+                // Немедленно перезапускаем прослушивание
+                if (isListening) {
+                    errorHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (isListening) {
+                                startListening();
+                            }
+                        }
+                    });
+                }
+            }
+
+            @Override
+            public void onPartialResults(Bundle partialResults) {
+                ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (matches != null && !matches.isEmpty()) {
+                    String partialText = matches.get(0);
+                    if (partialText != null && !partialText.trim().isEmpty()) {
+                        String displayText = partialText;
+                        if (displayText.length() > 50) {
+                            displayText = "..." + displayText.substring(displayText.length() - 47);
+                        }
+                        updateStatus("Частично: " + displayText);
+                    }
+                }
+            }
+
+            @Override
+            public void onEvent(int eventType, Bundle params) {
+                // Событие
+            }
+        };
+    }
+
     private void handleRecognitionError(int error) {
         String errorMessage = getErrorText(error);
         updateStatus("Ошибка (" + error + ") - " + errorMessage);
 
-        if (isListening) {
+        if (isListening && !isRestarting) {
             boolean shouldRestart = false;
+            boolean shouldFullRestart = false;
 
             switch (error) {
                 case SpeechRecognizer.ERROR_NO_MATCH:
@@ -482,10 +502,10 @@ public class SpeechToText {
                 case SpeechRecognizer.ERROR_SERVER:
                     serverErrorRetryCount++;
                     if (serverErrorRetryCount <= MAX_SERVER_ERROR_RETRIES) {
-                        shouldRestart = true;
+                        shouldFullRestart = enableFullRestartOnCriticalErrors;
                         Toast.makeText(context,
                                 "Ошибка сервера распознавания (" + serverErrorRetryCount + "/" +
-                                        MAX_SERVER_ERROR_RETRIES + "), перезапуск...",
+                                        MAX_SERVER_ERROR_RETRIES + "), " + (shouldFullRestart ? "полный перезапуск..." : "перезапуск..."),
                                 Toast.LENGTH_SHORT).show();
                     } else {
                         Toast.makeText(context,
@@ -502,8 +522,10 @@ public class SpeechToText {
                 case SpeechRecognizer.ERROR_CLIENT:
                 case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
                 case SpeechRecognizer.ERROR_AUDIO:
-                    shouldRestart = true;
-                    Toast.makeText(context, "Ошибка клиента, перезапуск...", Toast.LENGTH_SHORT).show();
+                    shouldFullRestart = enableFullRestartOnCriticalErrors;
+                    Toast.makeText(context,
+                            "Ошибка клиента/аудио, " + (shouldFullRestart ? "полный перезапуск..." : "перезапуск..."),
+                            Toast.LENGTH_SHORT).show();
                     break;
 
                 default:
@@ -511,7 +533,10 @@ public class SpeechToText {
                     break;
             }
 
-            if (shouldRestart && isListening) {
+            if (shouldFullRestart && enableFullRestartOnCriticalErrors) {
+                // Полный перезапуск всей системы распознавания
+                fullRestartRecognition();
+            } else if (shouldRestart && isListening) {
                 errorHandler.postDelayed(new Runnable() {
                     @Override
                     public void run() {
@@ -524,10 +549,65 @@ public class SpeechToText {
         }
     }
 
+    // Метод для полного перезапуска системы распознавания
+    private void fullRestartRecognition() {
+        if (isRestarting) {
+            return; // Уже в процессе перезапуска
+        }
+
+        isRestarting = true;
+        updateStatus("Полный перезапуск системы...");
+
+        // 1. Останавливаем текущее распознавание
+        if (speechRecognizer != null) {
+            try {
+                speechRecognizer.stopListening();
+                speechRecognizer.destroy();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+
+        // 2. Удаляем все pending задачи
+        errorHandler.removeCallbacksAndMessages(null);
+
+        // 3. Пауза перед повторной инициализацией
+        errorHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                // 4. Сбрасываем состояние
+                consecutiveSilenceCount = 0;
+                lastProcessedText = "";
+
+                // 5. Создаем новый распознаватель
+                if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                    speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context);
+                    speechRecognizer.setRecognitionListener(createRecognitionListener());
+
+                    // 6. Запускаем прослушивание заново
+                    activity.runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (isListening) {
+                                startListening();
+                                updateStatus("Система перезапущена, продолжаем...");
+                                Toast.makeText(context, "Система распознавания перезапущена", Toast.LENGTH_SHORT).show();
+                            }
+                        }
+                    });
+                }
+
+                // 7. Сбрасываем флаг перезапуска
+                isRestarting = false;
+            }
+        }, autoRestartDelay);
+    }
+
     public void startTranscription() {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             if (speechRecognizer != null) {
                 isListening = true;
+                isRestarting = false; // Сбрасываем флаг при ручном запуске
                 serverErrorRetryCount = 0;
                 updateStatus("Запуск...");
                 startListening();
@@ -545,6 +625,7 @@ public class SpeechToText {
 
     public void stopTranscription() {
         isListening = false;
+        isRestarting = false; // Сбрасываем флаг при остановке
         errorHandler.removeCallbacksAndMessages(null);
 
         if (speechRecognizer != null) {
@@ -652,7 +733,7 @@ public class SpeechToText {
         });
     }
 
-    // Методы обработки пунктуации (аналогичные MainActivity)
+    // Методы обработки пунктуации
     private String processTextWithPunctuation(String text) {
         String lowerText = text.toLowerCase().trim();
         String processedText = text;
@@ -829,6 +910,7 @@ public class SpeechToText {
 
     // Методы управления ресурсами
     public void onDestroy() {
+        isRestarting = false;
         errorHandler.removeCallbacksAndMessages(null);
         if (executorService != null && !executorService.isShutdown()) {
             executorService.shutdown();
@@ -843,11 +925,16 @@ public class SpeechToText {
         lastProcessedText = "";
         consecutiveSilenceCount = 0;
         serverErrorRetryCount = 0;
+        isRestarting = false;
     }
 
     // Методы для получения состояния
     public boolean isListening() {
         return isListening;
+    }
+
+    public boolean isRestarting() {
+        return isRestarting;
     }
 
     public int getServerErrorRetryCount() {
